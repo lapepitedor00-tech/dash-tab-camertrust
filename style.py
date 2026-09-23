@@ -106,9 +106,40 @@ html, body {
    sur blanc plat. La barre latérale garde le thème par défaut de
    Streamlit pour rester clairement identifiable comme un panneau
    « réglages », distinct du contenu applicatif (heuristique de
-   reconnaissance des zones fonctionnelles). */
+   reconnaissance des zones fonctionnelles).
+
+   `color` est fixé ici pour la même raison que `background` : sans lui,
+   les textes natifs de Streamlit qui n'ont pas de couleur explicite dans
+   ce fichier (st.subheader, st.caption, l'intitulé d'un st.expander...)
+   héritent de la couleur de texte par défaut de Streamlit — laquelle
+   dépend du thème résolu par Streamlit (clair ou sombre selon
+   `.streamlit/config.toml`, ou à défaut selon la préférence système du
+   navigateur visiteur). Si ce thème bascule en sombre alors que le fond
+   ci-dessus reste volontairement clair (`--ct-bg`), le texte devient
+   presque blanc sur un fond presque blanc — illisible. Ex. observé :
+   le bouton « Historique brut de la session (débogage) » sur la page
+   principale et le titre « Alertes récentes » de Console_supervision
+   disparaissaient ainsi dès que le thème Streamlit résolu n'était pas le
+   thème clair prévu. Fixer `color` ici, au même endroit que `background`,
+   rend l'application lisible même si `.streamlit/config.toml` venait à
+   manquer (dossier caché, facilement oublié lors d'un zip/upload) —
+   sans rien changer aux éléments qui ont déjà leur propre couleur
+   explicite (boutons, badges, `.ct-card-title`, `st.metric`...), qui
+   restent prioritaires sur cette couleur héritée. */
 [data-testid="stMain"] {
     background: var(--ct-bg);
+    color: var(--ct-text);
+}
+
+/* Cas particulier : les libellés de champs (« Date », « Statut »,
+   « Plafond de transaction (FCFA)»...) ne sont PAS de simples
+   descendants texte — Streamlit leur applique sa propre couleur de
+   thème via une règle CSS interne plus spécifique que le `color`
+   hérité ci-dessus, qui ne suffit donc pas à les corriger. Même cause,
+   même risque de libellé illisible si le thème résolu n'est pas le
+   thème clair prévu : on les fixe explicitement ici aussi. */
+[data-testid="stMain"] [data-testid="stWidgetLabel"] p {
+    color: var(--ct-text);
 }
 
 /* ====================================================================
