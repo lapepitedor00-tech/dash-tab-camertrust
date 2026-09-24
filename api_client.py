@@ -41,6 +41,20 @@ Si l'API ne répond pas (service Render endormi, pas de réseau le jour J),
 chaque fonction bascule automatiquement sur `demo_backend.py`, qui rejoue
 un scénario réaliste en mémoire. `st.session_state['api_online']` indique
 l'état courant et est affiché dans la barre latérale de chaque page.
+
+Compte inconnu (404) ≠ API injoignable
+----------------------------------------
+Un 404 sur une route « /users/{id}/... » ou « /alerts/{id} » signifie que
+l'API a bien répondu (elle est donc EN LIGNE) mais qu'aucun compte ne
+correspond à cet identifiant côté base de données — cas typique du
+compte de démo « C123 » utilisé par `pages/1_📲_Espace_client.py », qui
+n'existe réellement que dans `demo_backend.py`, pas dans la vraie base
+d'E2. Les fonctions concernées (`get_trustscore`, `get_alerts`,
+`get_settings`) lèvent `CompteInconnuError` dans ce cas précis, SANS
+marquer l'API hors ligne et SANS basculer sur le simulateur — à charge
+de la page appelante de proposer une inscription plutôt que d'afficher
+silencieusement des données de démonstration qui ne correspondent à
+rien de réel.
 """
 
 from __future__ import annotations
@@ -51,6 +65,18 @@ import requests
 from demo_backend import new_backend
 
 TIMEOUT_S = 4  # le service Render peut être lent au réveil ; voir README
+
+
+class CompteInconnuError(Exception):
+    """L'API a répondu 404 pour cet identifiant : elle est donc EN LIGNE,
+    mais aucun compte ne correspond à cet `user_id` côté base de données
+    (voir la note « Compte inconnu (404) ≠ API injoignable » ci-dessus).
+    À la charge de la page appelante d'offrir une inscription plutôt que
+    d'afficher des données de démonstration sans rapport."""
+
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+        super().__init__(f"Aucun compte « {user_id} » sur cette API")
 
 
 def get_api_url() -> str:
@@ -129,9 +155,14 @@ def register_user(phone_number: str) -> dict:
 def delete_user(user_id: str) -> dict:
     try:
         r = _delete(f"/users/{user_id}")
+        if r.status_code == 404:
+            _mark_status(True)
+            raise CompteInconnuError(user_id)
         r.raise_for_status()
         _mark_status(True)
         return r.json() if r.content else {"deleted": True}
+    except CompteInconnuError:
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().delete_user(user_id)
@@ -160,9 +191,14 @@ def score_transaction(user_id: str, amount: int, type_op: str, hour: int,
 def get_alerts(user_id: str) -> list[dict]:
     try:
         r = _get(f"/alerts/{user_id}")
+        if r.status_code == 404:
+            _mark_status(True)
+            raise CompteInconnuError(user_id)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except CompteInconnuError:
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().get_alerts(user_id)
@@ -185,9 +221,14 @@ def respond_alert(alert_id: str, reponse: int) -> dict:
 def get_settings(user_id: str) -> dict:
     try:
         r = _get(f"/users/{user_id}/settings")
+        if r.status_code == 404:
+            _mark_status(True)
+            raise CompteInconnuError(user_id)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except CompteInconnuError:
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().get_settings(user_id)
@@ -197,9 +238,14 @@ def put_settings(user_id: str, **kwargs) -> dict:
     payload = {k: v for k, v in kwargs.items() if v is not None}
     try:
         r = _put(f"/users/{user_id}/settings", json=payload)
+        if r.status_code == 404:
+            _mark_status(True)
+            raise CompteInconnuError(user_id)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except CompteInconnuError:
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().put_settings(user_id, **payload)
@@ -208,9 +254,14 @@ def put_settings(user_id: str, **kwargs) -> dict:
 def get_trustscore(user_id: str) -> dict:
     try:
         r = _get(f"/users/{user_id}/trustscore")
+        if r.status_code == 404:
+            _mark_status(True)
+            raise CompteInconnuError(user_id)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except CompteInconnuError:
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().get_trustscore(user_id)

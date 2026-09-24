@@ -25,6 +25,7 @@ import streamlit as st
 from PIL import Image
 
 import api_client
+from api_client import CompteInconnuError
 from style import LOGO_PATH, PHONE_CSS, app_header, badge, bottom_nav, settings_trigger
 
 st.set_page_config(
@@ -74,6 +75,29 @@ _init_state()
 # clés des deux jeux de widgets tout en gardant un seul état partagé
 # (`st.session_state`), donc les deux surfaces restent synchronisées.
 # ---------------------------------------------------------------------------
+def _on_api_url_change(suffix: str) -> None:
+    """`_render_demo_settings` est appelée deux fois (barre latérale +
+    popover mobile ⚙️), donc DEUX widgets `st.text_input` indépendants
+    affichent la même URL. `st.popover` exécute son contenu à CHAQUE
+    rechargement, même fermé — le jumeau caché est donc bien instancié en
+    permanence, pas seulement à l'ouverture.
+
+    Piège Streamlit : passer `value=st.session_state["api_url"]` à un
+    widget ne fixe sa valeur affichée qu'à sa toute PREMIÈRE instanciation
+    — aux rechargements suivants, le widget garde sa propre valeur
+    mémorisée (celle de son premier rendu) et ignore `value=`. Sans ce
+    callback, le jumeau jamais retouché par l'utilisateur revenait donc
+    silencieusement à son ancienne valeur à chaque rechargement, et
+    écrasait la nouvelle URL tout juste saisie dans l'autre champ — un
+    utilisateur pouvait ainsi voir son URL Railway/Render « ne pas
+    tenir ». On force ici explicitement les DEUX widgets (et l'état
+    partagé) à la même valeur à chaque changement, des deux côtés."""
+    nouvelle_url = st.session_state[f"api_url_input_{suffix}"]
+    st.session_state["api_url"] = nouvelle_url
+    autre_suffixe = "m" if suffix == "sb" else "sb"
+    st.session_state[f"api_url_input_{autre_suffixe}"] = nouvelle_url
+
+
 def _render_demo_settings(suffix: str) -> None:
     choix_numero = st.selectbox(
         "Abonné simulé", list(NUMEROS_DEMO.keys()), key=f"subscriber_choice_{suffix}",
@@ -94,11 +118,17 @@ def _render_demo_settings(suffix: str) -> None:
         )
 
     with st.expander("🔧 Réglages avancés"):
-        api_url_input = st.text_input(
-            "URL de l'API (E2)", value=st.session_state["api_url"], key=f"api_url_input_{suffix}",
+        # Pas de `value=` ici : Streamlit prévient à juste titre qu'on ne
+        # doit pas fixer à la fois `value=` ET écrire dans
+        # `st.session_state[clé]` (ce que fait `_on_api_url_change` pour
+        # synchroniser le jumeau) — seul `st.session_state.setdefault`
+        # initialise ce widget à son premier rendu ; ensuite, `key=` seul
+        # suffit à le relier à l'état partagé.
+        st.session_state.setdefault(f"api_url_input_{suffix}", st.session_state["api_url"])
+        st.text_input(
+            "URL de l'API (E2)", key=f"api_url_input_{suffix}",
+            on_change=_on_api_url_change, args=(suffix,),
         )
-        if api_url_input != st.session_state["api_url"]:
-            st.session_state["api_url"] = api_url_input
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -264,7 +294,17 @@ with col_sms:
             )
             alert_id = m.get("alert_id")
             if alert_id:
-                alerts = api_client.get_alerts("C123")  # démo mono-compte ; voir README pour la généralisation multi-comptes
+                try:
+                    # Terminal à touches : scénario démo mono-compte
+                    # (voir README pour la généralisation multi-comptes).
+                    # Sur une vraie API sans ce compte "C123" précis, on
+                    # traite l'absence de correspondance comme "statut
+                    # inconnu" plutôt que de laisser planter la page — ce
+                    # panneau se contente alors de ne pas afficher les
+                    # boutons de réponse pour ce SMS.
+                    alerts = api_client.get_alerts("C123")
+                except CompteInconnuError:
+                    alerts = []
                 alerte = next((a for a in alerts if a["alert_id"] == alert_id), None)
                 if alerte and alerte.get("statut") == "en_attente":
                     # Loi de Fitts : les deux réponses possibles sont
