@@ -55,6 +55,14 @@ marquer l'API hors ligne et SANS basculer sur le simulateur — à charge
 de la page appelante de proposer une inscription plutôt que d'afficher
 silencieusement des données de démonstration qui ne correspondent à
 rien de réel.
+
+Numéro déjà inscrit (409) ≠ API injoignable
+---------------------------------------------
+Même principe pour `register_user` : un 409 sur `/users/register`
+signifie que l'API a bien répondu (EN LIGNE) mais que ce numéro est déjà
+inscrit — `register_user` lève alors `NumeroDejaInscritError` plutôt que
+de basculer sur le simulateur (voir cette exception ci-dessous pour le
+détail du bug que cela corrige).
 """
 
 from __future__ import annotations
@@ -77,6 +85,27 @@ class CompteInconnuError(Exception):
     def __init__(self, user_id: str):
         self.user_id = user_id
         super().__init__(f"Aucun compte « {user_id} » sur cette API")
+
+
+class NumeroDejaInscritError(Exception):
+    """L'API a répondu 409 sur `/users/register` : elle est donc EN LIGNE,
+    mais ce numéro est déjà inscrit (et pas désinscrit) côté serveur —
+    voir `api/routers/users.py::inscrire` d'E2. Même famille de bug que
+    `CompteInconnuError` ci-dessus : sans cette distinction, `raise_for_status()`
+    transforme ce 409 (réponse parfaitement normale de l'API) en
+    `requests.HTTPError`, capté par le `except requests.RequestException`
+    générique, qui bascule alors à tort en mode démo hors ligne — observé
+    en pratique quand on clique « S'inscrire » sans changer le numéro
+    proposé par défaut dans `_ecran_compte_inconnu` (voir
+    `pages/1_📲_Espace_client.py`), déjà inscrit lors d'un essai
+    précédent. Les numéros n'étant JAMAIS stockés en clair (hachage
+    côté E2), il n'existe aucune route pour retrouver l'identifiant de
+    compte à partir du numéro : à charge de la page appelante de le dire
+    clairement plutôt que d'afficher un faux compte de démonstration."""
+
+    def __init__(self, phone_number: str):
+        self.phone_number = phone_number
+        super().__init__(f"Le numéro « {phone_number} » est déjà inscrit")
 
 
 def get_api_url() -> str:
@@ -144,9 +173,14 @@ def check_health() -> bool:
 def register_user(phone_number: str) -> dict:
     try:
         r = _post("/users/register", json={"phone_number": phone_number})
+        if r.status_code == 409:
+            _mark_status(True)
+            raise NumeroDejaInscritError(phone_number)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except NumeroDejaInscritError:
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().register_user(phone_number)
