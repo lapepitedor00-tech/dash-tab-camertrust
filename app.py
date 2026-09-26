@@ -25,8 +25,18 @@ import streamlit as st
 from PIL import Image
 
 import api_client
-from api_client import CompteInconnuError
+from api_client import (
+    AlerteDejaTraiteeError,
+    AlerteInconnueError,
+    CompteBloqueError,
+    CompteInconnuError,
+)
 from style import LOGO_PATH, PHONE_CSS, app_header, badge, bottom_nav, settings_trigger
+
+# Identifiant de démonstration hors ligne — n'existe QUE dans
+# `demo_backend.py` (voir la note juste en dessous, sur le panneau
+# "Simuler une transaction suspecte").
+USER_ID_DEMO_HORS_LIGNE = "C123"
 
 st.set_page_config(
     page_title="CamerTrust — Émulateur",
@@ -139,19 +149,84 @@ def _render_demo_settings(suffix: str) -> None:
                 with st.spinner("Ping /health (jusqu'à 10 min si l'instance dormait)…"):
                     api_client.check_health()
 
-    with st.expander("💡 Simuler une transaction suspecte"):
+    # Bug « le message de résultat n'apparaît pas après avoir cliqué sur
+    # Envoyer la transaction » (constaté en testant automatiquement ce
+    # panneau, y compris après une première tentative de correctif) :
+    # `st.expander(...)` SANS `expanded=` se referme à CHAQUE rerun, et
+    # `expanded=st.session_state[...]` lu en tête de fonction garde
+    # l'ANCIENNE valeur pendant le rerun déclenché par le clic lui-même
+    # (le `st.session_state[cle_expander] = True` ci-dessous n'est relu
+    # qu'au rerun SUIVANT) — st.error/st.warning/st.success s'exécutaient
+    # donc bien, mais dans un panneau encore replié au moment où Streamlit
+    # dessine cette page, invisibles tant qu'on ne rouvrait pas le panneau
+    # à la main. Corrigé en deux temps : (1) un `st.rerun()` explicite
+    # juste après le clic, comme pour le bouton *888# plus bas, pour que le
+    # panneau se redessine bien `expanded=True` dès l'affichage suivant ;
+    # (2) comme ce rerun repart de zéro (le clic n'est « vrai » que pour un
+    # seul run), le RÉSULTAT lui-même est mémorisé dans st.session_state
+    # plutôt que simplement affiché une fois, pour survivre à ce rerun.
+    cle_expander = f"expander_tx_ouvert_{suffix}"
+    cle_resultat = f"resultat_tx_{suffix}"
+    with st.expander("💡 Simuler une transaction suspecte", expanded=st.session_state.get(cle_expander, False)):
+        # Cible le compte RÉEL inscrit depuis l'Espace client s'il y en a
+        # un dans cette session (`espace_user_id`), sinon le compte de
+        # démo hors ligne. Avant ce correctif, "C123" était ciblé en dur
+        # ici : sur l'API réelle, ce compte n'existe presque jamais (E2
+        # génère des identifiants aléatoires), donc `score_transaction`
+        # recevait un 404 « Compte inconnu » — une réponse normale d'une
+        # API bien en ligne, mais confondue avec une panne réseau (voir
+        # `score_transaction` dans `api_client.py`) : la transaction était
+        # alors scorée en silence par le simulateur hors ligne
+        # (`demo_backend.py`, en mémoire) au lieu de la vraie API, d'où le
+        # symptôme « bascule en mode démo, rien ne change sur la Console
+        # de supervision ni sur les alertes détectées » malgré le message
+        # de succès affiché ci-dessous.
+        cible = st.session_state.get("espace_user_id", USER_ID_DEMO_HORS_LIGNE)
+        st.caption(f"Compte ciblé : {cible}" + (
+            " (démo hors ligne)" if cible == USER_ID_DEMO_HORS_LIGNE else " (inscrit depuis l'Espace client)"
+        ))
         st.caption("Injecte une transaction pour déclencher une alerte, comme le ferait un vrai flux transactionnel côté opérateur.")
         montant = st.number_input("Montant (FCFA)", min_value=1000, value=450_000, step=10_000, key=f"montant_{suffix}")
         heure = st.slider("Heure de la transaction", 0, 23, 2, key=f"heure_{suffix}")
         type_op = st.selectbox("Type d'opération", ["retrait", "transfert"], key=f"type_op_{suffix}")
         if st.button("Envoyer la transaction", width='stretch', key=f"send_tx_{suffix}"):
-            res = api_client.score_transaction(
-                user_id="C123", amount=int(montant), type_op=type_op, hour=int(heure),
-            )
-            if res.get("is_fraud"):
-                st.success("Transaction risquée détectée — une alerte vient d'être envoyée à l'abonné (voir la boîte SMS).")
+            st.session_state[cle_expander] = True
+            try:
+                with st.spinner("Envoi de la transaction…"):
+                    res = api_client.score_transaction(
+                        user_id=cible, amount=int(montant), type_op=type_op, hour=int(heure),
+                    )
+            except CompteInconnuError:
+                st.session_state[cle_resultat] = (
+                    "error",
+                    f"Le compte « {cible} » n'existe pas sur cette API — inscrivez-vous "
+                    "d'abord depuis l'Espace client, ou repassez en mode démo pour tester "
+                    "sans compte réel.",
+                )
+            except CompteBloqueError as exc:
+                st.session_state[cle_resultat] = (
+                    "warning",
+                    f"Compte « {cible} » actuellement bloqué : {exc.detail or 'blocage temporaire en cours.'}",
+                )
             else:
-                st.info("Transaction jugée conforme aux habitudes — aucune alerte envoyée.")
+                if res.get("is_fraud"):
+                    st.session_state[cle_resultat] = (
+                        "success",
+                        "Transaction risquée détectée — une alerte vient d'être envoyée à l'abonné (voir la boîte SMS).",
+                    )
+                else:
+                    st.session_state[cle_resultat] = (
+                        "info",
+                        "Transaction jugée conforme aux habitudes — aucune alerte envoyée.",
+                    )
+            st.rerun()
+
+        # Affiche le résultat de la dernière transaction envoyée : mémorisé
+        # dans st.session_state (voir le commentaire ci-dessus) pour rester
+        # visible après le `st.rerun()` qui garde ce panneau ouvert.
+        if cle_resultat in st.session_state:
+            type_message, texte_message = st.session_state[cle_resultat]
+            getattr(st, type_message)(texte_message)
 
 
 # ---------------------------------------------------------------------------
@@ -209,9 +284,16 @@ with col_ussd:
             if st.button("☎️ Composer *888#", width='stretch', type="primary"):
                 st.session_state["session_id"] = str(uuid.uuid4())
                 st.session_state["accumulated"] = []
-                reponse = api_client.ussd_request(
-                    st.session_state["session_id"], st.session_state["phone_number"], "",
-                )
+                # Sans indicateur de chargement, un aller-retour réseau
+                # lent vers l'API réelle (Railway) laisse l'écran figé sur
+                # ce même bouton pendant plusieurs secondes, sans aucun
+                # signe visible que quelque chose se passe — facile à
+                # confondre avec « le clavier n'apparaît pas » alors qu'il
+                # ne s'agit que d'une attente sans retour visuel.
+                with st.spinner("Connexion à l'API…"):
+                    reponse = api_client.ussd_request(
+                        st.session_state["session_id"], st.session_state["phone_number"], "",
+                    )
                 st.session_state["current_screen"] = reponse[4:].strip() if reponse[:3] in ("CON", "END") else reponse
                 st.session_state["session_active"] = reponse.startswith("CON")
                 st.rerun()
@@ -249,9 +331,10 @@ with col_ussd:
                     st.session_state["accumulated"].append(buffer)
                     st.session_state["keypad_buffer"] = ""
                     texte = "*".join(st.session_state["accumulated"])
-                    reponse = api_client.ussd_request(
-                        st.session_state["session_id"], st.session_state["phone_number"], texte,
-                    )
+                    with st.spinner("Connexion à l'API…"):
+                        reponse = api_client.ussd_request(
+                            st.session_state["session_id"], st.session_state["phone_number"], texte,
+                        )
                     st.session_state["current_screen"] = reponse[4:].strip() if reponse[:3] in ("CON", "END") else reponse
                     st.session_state["session_active"] = reponse.startswith("CON")
                     st.rerun()
@@ -295,14 +378,19 @@ with col_sms:
             alert_id = m.get("alert_id")
             if alert_id:
                 try:
-                    # Terminal à touches : scénario démo mono-compte
-                    # (voir README pour la généralisation multi-comptes).
-                    # Sur une vraie API sans ce compte "C123" précis, on
-                    # traite l'absence de correspondance comme "statut
-                    # inconnu" plutôt que de laisser planter la page — ce
-                    # panneau se contente alors de ne pas afficher les
-                    # boutons de réponse pour ce SMS.
-                    alerts = api_client.get_alerts("C123")
+                    # Terminal à touches : scénario démo mono-compte (voir
+                    # README pour la généralisation multi-comptes) — cible
+                    # le même compte que le panneau "Simuler une
+                    # transaction suspecte" ci-dessus (`espace_user_id` si
+                    # un vrai compte a été inscrit depuis l'Espace client,
+                    # sinon le compte de démo). Sur une API réelle sans ce
+                    # compte précis, on traite l'absence de correspondance
+                    # comme "statut inconnu" plutôt que de laisser planter
+                    # la page — ce panneau se contente alors de ne pas
+                    # afficher les boutons de réponse pour ce SMS.
+                    alerts = api_client.get_alerts(
+                        st.session_state.get("espace_user_id", USER_ID_DEMO_HORS_LIGNE)
+                    )
                 except CompteInconnuError:
                     alerts = []
                 alerte = next((a for a in alerts if a["alert_id"] == alert_id), None)
@@ -315,11 +403,21 @@ with col_sms:
                     c1, c2 = st.columns(2)
                     with c1:
                         if st.button("1️⃣ C'est moi", key=f"conf_{m['id']}", width='stretch'):
-                            api_client.respond_alert(alert_id, 1)
+                            try:
+                                api_client.respond_alert(alert_id, 1)
+                            except AlerteInconnueError:
+                                st.error("Cette alerte n'existe pas (ou plus) sur cette API.")
+                            except AlerteDejaTraiteeError as exc:
+                                st.warning(f"Cette alerte a déjà été traitée ({exc.statut_actuel}).")
                             st.rerun()
                     with c2:
                         if st.button("2️⃣ Ce n'est pas moi", key=f"disp_{m['id']}", width='stretch', type="primary"):
-                            api_client.respond_alert(alert_id, 2)
+                            try:
+                                api_client.respond_alert(alert_id, 2)
+                            except AlerteInconnueError:
+                                st.error("Cette alerte n'existe pas (ou plus) sur cette API.")
+                            except AlerteDejaTraiteeError as exc:
+                                st.warning(f"Cette alerte a déjà été traitée ({exc.statut_actuel}).")
                             st.rerun()
                 elif alerte:
                     statut_badge = {

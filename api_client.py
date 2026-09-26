@@ -108,6 +108,43 @@ class NumeroDejaInscritError(Exception):
         super().__init__(f"Le numéro « {phone_number} » est déjà inscrit")
 
 
+class CompteBloqueError(Exception):
+    """L'API a répondu 403 sur `/transactions/score` : elle est donc EN
+    LIGNE, mais ce compte est actuellement bloqué (réponse « 2 » à une
+    alerte précédente, blocage réel de 30 min — voir
+    `routers/transactions.py::scorer` d'E2). Distinct d'une vraie panne
+    réseau pour la même raison que les exceptions ci-dessus."""
+
+    def __init__(self, user_id: str, detail: str = ""):
+        self.user_id = user_id
+        self.detail = detail
+        super().__init__(f"Compte « {user_id} » temporairement bloqué")
+
+
+class AlerteInconnueError(Exception):
+    """L'API a répondu 404 sur `/alerts/{alert_id}/respond` : elle est
+    donc EN LIGNE, mais cet `alert_id` n'existe pas côté serveur (voir
+    `routers/alerts.py::repondre_alerte` d'E2) — typiquement une alerte
+    encore affichée localement (cache) alors qu'elle vient d'un scénario
+    de démonstration hors ligne et n'a donc jamais existé sur cette API."""
+
+    def __init__(self, alert_id: str):
+        self.alert_id = alert_id
+        super().__init__(f"Alerte « {alert_id} » inconnue sur cette API")
+
+
+class AlerteDejaTraiteeError(Exception):
+    """L'API a répondu 409 sur `/alerts/{alert_id}/respond` : elle est
+    donc EN LIGNE, mais cette alerte a déjà reçu une réponse (statut ≠
+    "en_attente" côté serveur) — par ex. un double clic, ou un onglet
+    resté ouvert avec un cache local périmé."""
+
+    def __init__(self, alert_id: str, statut_actuel: str = ""):
+        self.alert_id = alert_id
+        self.statut_actuel = statut_actuel
+        super().__init__(f"Alerte « {alert_id} » déjà traitée ({statut_actuel})")
+
+
 def get_api_url() -> str:
     """URL de base de l'API d'E2. Ordre de priorité :
     1. `.streamlit/secrets.toml` (`api_url = "..."`) — utilisé en démo/prod.
@@ -207,13 +244,40 @@ def delete_user(user_id: str) -> dict:
 # ---------------------------------------------------------------------------
 def score_transaction(user_id: str, amount: int, type_op: str, hour: int,
                        destinataire: str = "numero inconnu") -> dict:
+    # Même famille de bug que `CompteInconnuError`/`NumeroDejaInscritError`
+    # ci-dessus : `routers/transactions.py::scorer` d'E2 répond 404 si
+    # `user_id` n'existe pas (ou est désinscrit) et 403 si le compte est
+    # actuellement bloqué — deux réponses parfaitement normales d'une API
+    # EN LIGNE. Sans cette distinction, `raise_for_status()` les
+    # transforme en `requests.HTTPError`, capté par le
+    # `except requests.RequestException` générique, qui bascule alors à
+    # tort en mode démo hors ligne : observé en pratique avec le panneau
+    # « Simuler une transaction suspecte » d'`app.py`, qui ciblait un
+    # `user_id` fixe non garanti d'exister sur l'API réelle — la
+    # transaction finissait alors scorée uniquement par
+    # `demo_backend.py` (en mémoire, invisible de la vraie base), d'où le
+    # symptôme « rien ne change sur la Console de supervision ni sur les
+    # alertes détectées » malgré un message de succès affiché.
     try:
         r = _post("/transactions/score", json={
             "user_id": user_id, "amount": amount, "type": type_op, "hour": hour,
         })
+        if r.status_code == 404:
+            _mark_status(True)
+            raise CompteInconnuError(user_id)
+        if r.status_code == 403:
+            _mark_status(True)
+            detail = ""
+            try:
+                detail = r.json().get("detail", "")
+            except ValueError:
+                pass
+            raise CompteBloqueError(user_id, detail)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except (CompteInconnuError, CompteBloqueError):
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().score_transaction(user_id, amount, type_op, hour, destinataire)
@@ -239,11 +303,32 @@ def get_alerts(user_id: str) -> list[dict]:
 
 
 def respond_alert(alert_id: str, reponse: int) -> dict:
+    # Même famille de bug que `score_transaction`/`CompteInconnuError`
+    # ci-dessus : `routers/alerts.py::repondre_alerte` d'E2 répond 404 si
+    # `alert_id` n'existe pas et 409 si l'alerte a déjà reçu une réponse —
+    # deux réponses normales d'une API EN LIGNE, à ne pas confondre avec
+    # une panne réseau (sans quoi la réponse de l'abonné — pourtant
+    # cruciale, c'est la boucle de retour d'E1 — serait enregistrée
+    # uniquement dans le simulateur hors ligne, invisible de la vraie
+    # base et de la Console de supervision).
     try:
         r = _post(f"/alerts/{alert_id}/respond", json={"response": reponse})
+        if r.status_code == 404:
+            _mark_status(True)
+            raise AlerteInconnueError(alert_id)
+        if r.status_code == 409:
+            _mark_status(True)
+            statut_actuel = ""
+            try:
+                statut_actuel = r.json().get("detail", "")
+            except ValueError:
+                pass
+            raise AlerteDejaTraiteeError(alert_id, statut_actuel)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except (AlerteInconnueError, AlerteDejaTraiteeError):
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().respond_alert(alert_id, reponse)
@@ -302,11 +387,22 @@ def get_trustscore(user_id: str) -> dict:
 
 
 def report_fraud(user_id: str, description: str) -> dict:
+    # Même famille de bug que les autres fonctions ci-dessus (voir
+    # `routers/reports.py::signaler` d'E2 : 404 si `user_id` est inconnu,
+    # une réponse normale d'une API en ligne) — pas de point d'appel dans
+    # l'interface actuelle (le signalement via le menu USSD passe par
+    # `/ussd`, pas cette route REST), mais corrigé par cohérence pour
+    # toute future page qui l'utiliserait directement.
     try:
         r = _post("/reports", json={"user_id": user_id, "description": description})
+        if r.status_code == 404:
+            _mark_status(True)
+            raise CompteInconnuError(user_id)
         r.raise_for_status()
         _mark_status(True)
         return r.json()
+    except CompteInconnuError:
+        raise
     except requests.RequestException:
         _mark_status(False)
         return get_backend().report_fraud(user_id, description)

@@ -22,7 +22,12 @@ import streamlit as st
 from PIL import Image
 
 import api_client
-from api_client import CompteInconnuError, NumeroDejaInscritError
+from api_client import (
+    AlerteDejaTraiteeError,
+    AlerteInconnueError,
+    CompteInconnuError,
+    NumeroDejaInscritError,
+)
 from style import LOGO_PATH, PHONE_CSS, app_header, badge, bottom_nav, score_ring
 
 st.set_page_config(page_title="CamerTrust — Espace client", page_icon=Image.open(LOGO_PATH), layout="centered")
@@ -231,9 +236,21 @@ elif ecran == "🔔 Alertes":
                             # Loi de Fitts : deux grandes cibles pleine largeur,
                             # côte à côte — réponse rapide et sans ambiguïté.
                             c1, c2 = st.columns(2)
+                            # 404/409 sur /alerts/{id}/respond sont des réponses
+                            # NORMALES d'une API en ligne (voir respond_alert dans
+                            # api_client.py) — sans cette distinction, elles étaient
+                            # confondues avec une panne réseau et la réponse de
+                            # l'abonné finissait enregistrée uniquement dans le
+                            # simulateur hors ligne, invisible de la vraie base
+                            # (et de la boucle de retour d'E1).
                             with c1:
                                 if st.button("1️⃣ C'est moi", key=f"conf_{a['alert_id']}", width='stretch'):
-                                    api_client.respond_alert(a["alert_id"], 1)
+                                    try:
+                                        api_client.respond_alert(a["alert_id"], 1)
+                                    except AlerteInconnueError:
+                                        st.error("Cette alerte n'existe pas (ou plus) sur cette API.")
+                                    except AlerteDejaTraiteeError as exc:
+                                        st.warning(f"Cette alerte a déjà été traitée ({exc.statut_actuel}).")
                                     # Le statut de l'alerte a changé côté serveur : le
                                     # cache (voir _charger_avec_cache) serait sinon
                                     # affiché tel quel, encore "en_attente".
@@ -241,7 +258,12 @@ elif ecran == "🔔 Alertes":
                                     st.rerun()
                             with c2:
                                 if st.button("2️⃣ Ce n'est pas moi", key=f"disp_{a['alert_id']}", width='stretch', type="primary"):
-                                    api_client.respond_alert(a["alert_id"], 2)
+                                    try:
+                                        api_client.respond_alert(a["alert_id"], 2)
+                                    except AlerteInconnueError:
+                                        st.error("Cette alerte n'existe pas (ou plus) sur cette API.")
+                                    except AlerteDejaTraiteeError as exc:
+                                        st.warning(f"Cette alerte a déjà été traitée ({exc.statut_actuel}).")
                                     st.session_state.pop(f"cache_alertes_{USER_ID}", None)
                                     st.rerun()
 
